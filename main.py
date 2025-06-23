@@ -19,6 +19,7 @@ with open("config_secrets.json", mode="r") as file:
     token = json_open["token"]
     my_guild = json_open["guild_id"]
     bkey = json_open["bkey"]
+    role_id = json_open["role-id"]
 
 MG_GUILD = discord.Object(id=int(my_guild))
 URL = "https://api.bandit.camp/affiliates/is-affiliate"
@@ -58,6 +59,34 @@ async def on_ready():
     print('------')
 
 
+async def save_csv(steam_id: str, interaction: discord.Interaction):
+    if os.path.exists(CSV_FILE):
+        df = pd.read_csv(CSV_FILE)
+    else:
+        df = pd.DataFrame(columns=["steamid", "verified_date"])
+
+    # Check if steamid already exists
+    if steam_id not in df["steamid"].astype(str).values:
+        # Append new row
+        new_row = {
+            "steamid": steam_id,
+            "verified_date": datetime.datetime.now().strftime("%Y-%m-%d")
+        }
+        df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
+        df.to_csv(CSV_FILE, index=False)
+        await interaction.channel.send(f"Added SteamID {steam_id} to savedata.csv with verification date.")
+    else:
+        await interaction.channel.send(f"SteamID {steam_id} already in savedata.csv.")
+
+async def award_role(interaction: discord.Interaction):
+    role = interaction.guild.get_role(role_id)
+    if role is None:
+        await interaction.response.send_message("Role not found!")
+        return
+
+    await interaction.user.add_roles(role)
+    await interaction.channel.send("Verified!")
+
 @client.tree.command()
 @app_commands.describe(steam_id="Your steamid")
 async def verify(interaction: discord.Interaction, steam_id: str, debug_mode: bool = False):
@@ -87,26 +116,12 @@ async def verify(interaction: discord.Interaction, steam_id: str, debug_mode: bo
     if URL == "https://api.bandit.camp/affiliates/is-affiliate":
         await interaction.channel.send(f"Steam Userid {steam_id} is {'' if is_affiliate else 'not '}an affiliate!")
 
-        if is_affiliate:
+        if is_affiliate or debug_mode:
+            await interaction.channel.send("Saving anyway...")
             print("Setting data!")
-            # Load existing data or create a new DataFrame if the file doesn't exist
-            if os.path.exists(CSV_FILE):
-                df = pd.read_csv(CSV_FILE)
-            else:
-                df = pd.DataFrame(columns=["steamid", "verified_date"])
+            await save_csv(steam_id=steam_id, interaction=interaction)
+            await award_role(interaction=interaction)
 
-            # Check if steamid already exists
-            if steam_id not in df["steamid"].astype(str).values:
-                # Append new row
-                new_row = {
-                    "steamid": steam_id,
-                    "verified_date": datetime.datetime.now().strftime("%Y-%m-%d")
-                }
-                df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
-                df.to_csv(CSV_FILE, index=False)
-                await interaction.channel.send(f"Added SteamID {steam_id} to savedata.csv with verification date.")
-            else:
-                await interaction.channel.send(f"SteamID {steam_id} already in savedata.csv.")
 
 
 client.run(token=token)
