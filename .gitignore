@@ -10,3 +10,4 @@ wheels/
 .venv
 .secret
 config_secrets.json
+savedata*

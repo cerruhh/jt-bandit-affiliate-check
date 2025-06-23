@@ -5,6 +5,14 @@ import requests
 import json
 import asyncio
 
+import csv
+import os
+
+print(os.getcwd())
+
+import datetime
+import pandas as pd
+
 # Init the token
 with open("config_secrets.json", mode="r") as file:
     json_open = json.load(file)
@@ -14,7 +22,8 @@ with open("config_secrets.json", mode="r") as file:
 
 MG_GUILD = discord.Object(id=int(my_guild))
 URL = "https://api.bandit.camp/affiliates/is-affiliate"
-STEAM_URL = "https://api.steampowered.com/ISteamUser/GetPlayerSummaries/v2/" # ?key=YOUR_API_KEY&steamids=STEAM_ID
+STEAM_URL = "https://api.steampowered.com/ISteamUser/GetPlayerSummaries/v2/"  # ?key=YOUR_API_KEY&steamids=STEAM_ID
+CSV_FILE = "savedata.csv"
 
 
 class MyClient(discord.Client):
@@ -48,9 +57,9 @@ async def on_ready():
     print(f'Logged in as {client.user} (ID: {client.user.id})')
     print('------')
 
+
 @client.tree.command()
-@app_commands.describe(steam_id="Your steamid",
-                       debug_mode="Sets debug mode to true, shows the junk you don't care about")
+@app_commands.describe(steam_id="Your steamid")
 async def verify(interaction: discord.Interaction, steam_id: str, debug_mode: bool = False):
     await interaction.channel.send(f"Got id: {steam_id}")
     parameters: dict = {
@@ -72,9 +81,32 @@ async def verify(interaction: discord.Interaction, steam_id: str, debug_mode: bo
 
         if URL == "https://api.bandit.camp/affiliates/is-affiliate":
             await interaction.channel.send(f"IS-AFFIL: {response.json()["response"]}")
+
     is_affiliate = response.json()["response"]
 
     if URL == "https://api.bandit.camp/affiliates/is-affiliate":
-        await interaction.channel.send(f"Steam Userid {steam_id} is {'not ' if is_affiliate else ''}an affiliate!")
+        await interaction.channel.send(f"Steam Userid {steam_id} is {'' if is_affiliate else 'not '}an affiliate!")
+
+        if is_affiliate:
+            print("Setting data!")
+            # Load existing data or create a new DataFrame if the file doesn't exist
+            if os.path.exists(CSV_FILE):
+                df = pd.read_csv(CSV_FILE)
+            else:
+                df = pd.DataFrame(columns=["steamid", "verified_date"])
+
+            # Check if steamid already exists
+            if steam_id not in df["steamid"].astype(str).values:
+                # Append new row
+                new_row = {
+                    "steamid": steam_id,
+                    "verified_date": datetime.datetime.now().strftime("%Y-%m-%d")
+                }
+                df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
+                df.to_csv(CSV_FILE, index=False)
+                await interaction.channel.send(f"Added SteamID {steam_id} to savedata.csv with verification date.")
+            else:
+                await interaction.channel.send(f"SteamID {steam_id} already in savedata.csv.")
+
 
 client.run(token=token)
