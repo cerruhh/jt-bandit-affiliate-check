@@ -1,15 +1,13 @@
+from http.client import responses
+
 import discord
 from discord import app_commands
 
 import requests
 import json
 import asyncio
-
 import csv
 import os
-
-print(os.getcwd())
-
 import datetime
 import pandas as pd
 
@@ -70,13 +68,15 @@ async def save_csv(steam_id: str, interaction: discord.Interaction):
         # Append new row
         new_row = {
             "steamid": steam_id,
-            "verified_date": datetime.datetime.now().strftime("%Y-%m-%d")
+            "verified_date": datetime.datetime.now().strftime("%Y-%m-%d"),
+            "discord_id": str(interaction.user.id)
         }
         df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
         df.to_csv(CSV_FILE, index=False)
         await interaction.channel.send(f"Added SteamID {steam_id} to savedata.csv with verification date.")
     else:
         await interaction.channel.send(f"SteamID {steam_id} already in savedata.csv.")
+
 
 async def award_role(interaction: discord.Interaction):
     role = interaction.guild.get_role(role_id)
@@ -87,10 +87,18 @@ async def award_role(interaction: discord.Interaction):
     await interaction.user.add_roles(role)
     await interaction.channel.send("Verified!")
 
-@client.tree.command()
-@app_commands.describe(steam_id="Your steamid")
-async def verify(interaction: discord.Interaction, steam_id: str, debug_mode: bool = False):
-    await interaction.channel.send(f"Got id: {steam_id}")
+
+async def remove_role(interaction: discord.Interaction):
+    role = interaction.guild.get_role(role_id)
+    if role is None:
+        await interaction.response.send_message("Role not found!")
+        return
+
+    await interaction.user.remove_roles(role)
+    return
+
+
+async def send_request(steam_id: str):
     parameters: dict = {
         "steamid": steam_id,
     }
@@ -100,11 +108,26 @@ async def verify(interaction: discord.Interaction, steam_id: str, debug_mode: bo
 
     response = requests.request("GET", url=URL,
                                 params=parameters, data={}, headers=headers)
+    return response
+
+
+@client.tree.command()
+@app_commands.describe(steam_id="Your steamid")
+async def verify(interaction: discord.Interaction, steam_id: str, debug_mode: bool = False):
+    if not interaction.user.resolved_permissions.administrator and debug_mode:
+        await interaction.response.send_message("You need to be an administrator to use debug mode!")
+        return
+
+    await interaction.channel.send(f"Got id: {steam_id}")
+
+    # Send the response
+    response = await send_request(steam_id=steam_id)
+
+    # Debug data
     if debug_mode:
         await interaction.channel.send(f"""SEND_URL: {URL}
     METHOD: GET
     HELLSPAWN1
-    PARAMS: {parameters}
     """)
         await interaction.channel.send(f"RESPONSE: {response.content}")
 
@@ -122,6 +145,34 @@ async def verify(interaction: discord.Interaction, steam_id: str, debug_mode: bo
             await save_csv(steam_id=steam_id, interaction=interaction)
             await award_role(interaction=interaction)
 
+
+@client.tree.command()
+@app_commands.default_permissions(administrator=True)
+async def update(interaction: discord.Interaction):
+    if not os.path.isfile(path=CSV_FILE):
+        await interaction.response.send_message("No savedata found!")
+        return
+
+    dataframe = pd.read_csv("savedata.csv")
+
+    # Record the amount of people no longer affilated
+    amount_of_users_dropped = 0
+    for index, row in dataframe.iterrows():
+        user_check_response = await send_request(steam_id=row["steamid"])
+
+        # No longer affiliated
+        if not user_check_response.json()["response"]:
+            # Remove from dataframe!
+            dataframe.drop(index=index, inplace=True)
+            await remove_role(interaction=interaction)
+            amount_of_users_dropped += 1
+
+    if amount_of_users_dropped == 0:
+        await interaction.channel.send(
+            f"{amount_of_users_dropped} dropped from affiliation role, savedata not written!")
+    else:
+        dataframe.to_csv(path_or_buf=CSV_FILE)
+        await interaction.channel.send(f"{amount_of_users_dropped} dropped from affiliation role, savedata written!")
 
 
 client.run(token=token)
