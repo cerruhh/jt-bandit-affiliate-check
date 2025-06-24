@@ -21,7 +21,6 @@ with open("config_secrets.json", mode="r") as file:
 
 MG_GUILD = discord.Object(id=int(my_guild))
 URL = "https://api.bandit.camp/affiliates/is-affiliate"
-STEAM_URL = "https://api.steampowered.com/ISteamUser/GetPlayerSummaries/v2/"  # ?key=YOUR_API_KEY&steamids=STEAM_ID
 CSV_FILE = "savedata.csv"
 
 
@@ -80,21 +79,38 @@ async def save_csv(steam_id: str, interaction: discord.Interaction):
 
 async def award_role(interaction: discord.Interaction):
     role = interaction.guild.get_role(role_id)
+    if interaction.guild.me.top_role <= interaction.user.top_role or interaction.user.resolved_permissions.administrator == True:
+        await interaction.channel.send("Cannot remove role from a user with higher permissions")
+        return
+
+    if not interaction.guild.me.guild_permissions.manage_roles:
+        await interaction.channel.send("I do not have the manage roles permission, exiting command.")
+        return
+
     if role is None:
-        await interaction.response.send_message("Role not found!")
+        await interaction.channel.send("Role not found!")
         return
 
     await interaction.user.add_roles(role)
     await interaction.channel.send("Verified!")
 
 
-async def remove_role(interaction: discord.Interaction):
-    role = interaction.guild.get_role(role_id)
-    if role is None:
-        await interaction.response.send_message("Role not found!")
+async def remove_role(user_id: int, interaction: discord.Interaction):
+    user = await interaction.guild.fetch_member(user_id)
+    if interaction.guild.me.top_role <= interaction.user.top_role or interaction.user.resolved_permissions.administrator == True:
+        await interaction.channel.send("Cannot remove role from a user with higher permissions")
         return
 
-    await interaction.user.remove_roles(role)
+    if not interaction.guild.me.guild_permissions.manage_roles:
+        await interaction.channel.send("I do not have the manage roles permission, exiting command.")
+        return
+
+    role = interaction.guild.get_role(role_id)
+    if role is None:
+        await interaction.channel.send("Role not found!")
+        return
+
+    await user.remove_roles(role)
     return
 
 
@@ -118,6 +134,18 @@ async def verify(interaction: discord.Interaction, steam_id: str, debug_mode: bo
         await interaction.response.send_message("You need to be an administrator to use debug mode!")
         return
 
+    role = interaction.guild.get_role(role_id)
+
+    if role in interaction.user.roles:
+        await interaction.response.send_message("User is already verified!")
+        return
+
+    dataframe = pd.read_csv("savedata.csv")
+    if interaction.user.id in dataframe["discord_id"].values:
+        await award_role(interaction=interaction)
+        await interaction.response.send_message("Adding missing role to your user...")
+        return
+
     await interaction.channel.send(f"Got id: {steam_id}")
 
     # Send the response
@@ -127,7 +155,6 @@ async def verify(interaction: discord.Interaction, steam_id: str, debug_mode: bo
     if debug_mode:
         await interaction.channel.send(f"""SEND_URL: {URL}
     METHOD: GET
-    HELLSPAWN1
     """)
         await interaction.channel.send(f"RESPONSE: {response.content}")
 
@@ -150,7 +177,7 @@ async def verify(interaction: discord.Interaction, steam_id: str, debug_mode: bo
 @app_commands.default_permissions(administrator=True)
 async def update(interaction: discord.Interaction):
     if not os.path.isfile(path=CSV_FILE):
-        await interaction.response.send_message("No savedata found!")
+        await interaction.response.send_message("No savedata saved!")
         return
 
     dataframe = pd.read_csv("savedata.csv")
@@ -162,9 +189,12 @@ async def update(interaction: discord.Interaction):
 
         # No longer affiliated
         if not user_check_response.json()["response"]:
+            dc_id: int = int(row["discord_id"])
+
             # Remove from dataframe!
             dataframe.drop(index=index, inplace=True)
-            await remove_role(interaction=interaction)
+            if interaction.guild.fetch_member(dc_id) in interaction.guild.members:
+                await remove_role(interaction=interaction, user_id=dc_id)
             amount_of_users_dropped += 1
 
     if amount_of_users_dropped == 0:
