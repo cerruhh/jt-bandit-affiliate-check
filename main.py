@@ -130,7 +130,7 @@ async def send_request(steam_id: str):
 
 
 @client.tree.command()
-@app_commands.describe(steam_id="Your SteamID64")
+@app_commands.describe(steam_id_64="Your SteamID64")
 async def verify(interaction: discord.Interaction, steam_id_64: str, debug_mode: bool = False):
     if not interaction.user.resolved_permissions.administrator and debug_mode:
         await interaction.response.send_message("You need to be an administrator to use debug mode!")
