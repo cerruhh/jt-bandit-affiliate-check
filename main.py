@@ -201,7 +201,7 @@ async def update(interaction: discord.Interaction):
 
             # Remove from dataframe!
             dataframe.drop(index=index, inplace=True)
-            if interaction.guild.fetch_member(dc_id) in interaction.guild.members:
+            if await interaction.guild.fetch_member(dc_id) in interaction.guild.members:
                 await remove_role(interaction=interaction, user_id=dc_id)
             amount_of_users_dropped += 1
 
