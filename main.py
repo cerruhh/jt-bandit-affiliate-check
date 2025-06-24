@@ -1,3 +1,4 @@
+import re
 from http.client import responses
 
 import discord
@@ -55,6 +56,13 @@ client = MyClient(intents=intents)
 async def on_ready():
     print(f'Logged in as {client.user} (ID: {client.user.id})')
     print('------')
+
+async def filter_steam_uri(uri:str) -> str:
+    match = re.search(r"steamcommunity\.com/profiles/(\d+)", uri)
+    if match:
+        steamid64 = match.group(1)
+        return steamid64
+    return "e2"
 
 
 async def save_csv(steam_id: str, interaction: discord.Interaction, debug_mode: bool = False):
@@ -155,6 +163,9 @@ async def verify(interaction: discord.Interaction, steam_id_64: str, debug_mode:
     if debug_mode:
         await interaction.channel.send(f"Got id: {steam_id_64}")
 
+    if "steamcommunity.com" in steam_id_64:
+        steam_id_64 = await filter_steam_uri(steam_id_64)
+
     # Send the response
     response = await send_request(steam_id=steam_id_64)
 
@@ -232,11 +243,13 @@ async def list(interaction: discord.Interaction):
         if user is not None:
             username = user.display_name
 
-        line = f"discord_id: {row['discord_id']}, join-date: {row['verified_date']}, steamid64: {row['steamid']}, username: {username}\n"
+        line = f"discord_id: {row['discord_id']}, join-date: {row['verified_date']}, steamid64: {row['steamid']}, username: {username}"
         lines.append(line)
 
     result = "\n".join(lines)
     print(result)
+    if result == "":
+        result = "Empty."
     await interaction.response.send_message(result)
 
 
