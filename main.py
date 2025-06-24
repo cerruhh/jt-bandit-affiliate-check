@@ -1,6 +1,7 @@
 from http.client import responses
 
 import discord
+import pandas.errors
 from discord import app_commands
 
 import requests
@@ -56,7 +57,7 @@ async def on_ready():
     print('------')
 
 
-async def save_csv(steam_id: str, interaction: discord.Interaction):
+async def save_csv(steam_id: str, interaction: discord.Interaction, debug_mode: bool = False):
     if os.path.exists(CSV_FILE):
         df = pd.read_csv(CSV_FILE)
     else:
@@ -72,7 +73,8 @@ async def save_csv(steam_id: str, interaction: discord.Interaction):
         }
         df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
         df.to_csv(CSV_FILE, index=False)
-        await interaction.channel.send(f"Added SteamID {steam_id} to savedata.csv with verification date.")
+        if debug_mode:
+            await interaction.channel.send(f"Added SteamID64 {steam_id} to savedata.csv with verification date.")
     else:
         await interaction.channel.send(f"SteamID {steam_id} already in savedata.csv.")
 
@@ -128,8 +130,8 @@ async def send_request(steam_id: str):
 
 
 @client.tree.command()
-@app_commands.describe(steam_id="Your steamid")
-async def verify(interaction: discord.Interaction, steam_id: str, debug_mode: bool = False):
+@app_commands.describe(steam_id="Your SteamID64")
+async def verify(interaction: discord.Interaction, steam_id_64: str, debug_mode: bool = False):
     if not interaction.user.resolved_permissions.administrator and debug_mode:
         await interaction.response.send_message("You need to be an administrator to use debug mode!")
         return
@@ -140,16 +142,21 @@ async def verify(interaction: discord.Interaction, steam_id: str, debug_mode: bo
         await interaction.response.send_message("User is already verified!")
         return
 
-    dataframe = pd.read_csv("savedata.csv")
-    if interaction.user.id in dataframe["discord_id"].values:
-        await award_role(interaction=interaction)
-        await interaction.response.send_message("Adding missing role to your user...")
-        return
+    if os.path.isfile(path=CSV_FILE):
+        try:
+            dataframe = pd.read_csv("savedata.csv")
+            if interaction.user.id in dataframe["discord_id"].values:
+                await award_role(interaction=interaction)
+                await interaction.response.send_message("Adding missing role to your user...")
+                return
+        except pandas.errors.EmptyDataError:
+            print("Empty data warning!")
 
-    await interaction.channel.send(f"Got id: {steam_id}")
+    if debug_mode:
+        await interaction.channel.send(f"Got id: {steam_id_64}")
 
     # Send the response
-    response = await send_request(steam_id=steam_id)
+    response = await send_request(steam_id=steam_id_64)
 
     # Debug data
     if debug_mode:
@@ -164,12 +171,13 @@ async def verify(interaction: discord.Interaction, steam_id: str, debug_mode: bo
     is_affiliate = response.json()["response"]
 
     if URL == "https://api.bandit.camp/affiliates/is-affiliate":
-        await interaction.channel.send(f"Steam Userid {steam_id} is {'' if is_affiliate else 'not '}an affiliate!")
+        await interaction.channel.send(f"Steam Userid {steam_id_64} is {'' if is_affiliate else 'not '}an affiliate!")
 
         if is_affiliate or debug_mode:
-            await interaction.channel.send("Saving anyway...")
+            if debug_mode:
+                await interaction.channel.send("Saving anyway...")
             print("Setting data!")
-            await save_csv(steam_id=steam_id, interaction=interaction)
+            await save_csv(steam_id=steam_id_64, interaction=interaction, debug_mode=debug_mode)
             await award_role(interaction=interaction)
 
 
