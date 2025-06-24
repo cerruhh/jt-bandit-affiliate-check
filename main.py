@@ -12,6 +12,7 @@ import csv
 import os
 import datetime
 import pandas as pd
+import datetime
 
 # Init the token
 with open("config_secrets.json", mode="r") as file:
@@ -57,7 +58,8 @@ async def on_ready():
     print(f'Logged in as {client.user} (ID: {client.user.id})')
     print('------')
 
-async def filter_steam_uri(uri:str) -> str:
+
+async def filter_steam_uri(uri: str) -> str:
     match = re.search(r"steamcommunity\.com/profiles/(\d+)", uri)
     if match:
         steamid64 = match.group(1)
@@ -165,6 +167,9 @@ async def verify(interaction: discord.Interaction, steam_id_64: str, debug_mode:
 
     if "steamcommunity.com" in steam_id_64:
         steam_id_64 = await filter_steam_uri(steam_id_64)
+        if steam_id_64:
+            await interaction.response.send_message("This steamcommunity link is not valid. try to enter a steamid64 instead if the issue persists.")
+            return
 
     # Send the response
     response = await send_request(steam_id=steam_id_64)
@@ -223,6 +228,7 @@ async def update(interaction: discord.Interaction):
         dataframe.to_csv(path_or_buf=CSV_FILE)
         await interaction.channel.send(f"{amount_of_users_dropped} dropped from affiliation role, savedata written!")
 
+
 @client.tree.command()
 @app_commands.default_permissions(administrator=True)
 async def list(interaction: discord.Interaction):
@@ -239,11 +245,17 @@ async def list(interaction: discord.Interaction):
     lines = []
     for _, row in df.iterrows():
         username = ""
-        user:discord.User = await client.fetch_user(int(row['discord_id']))
+        user: discord.User = await client.fetch_user(int(row['discord_id']))
         if user is not None:
             username = user.display_name
 
-        line = f"discord_id: {row['discord_id']}, join-date: {row['verified_date']}, steamid64: {row['steamid']}, username: {username}"
+        date_str: str = row['verified_date']
+        dt = datetime.datetime.strptime(date_str, "%Y-%m-%d")
+        dt = dt.replace(tzinfo=datetime.timezone.utc)  # Make it timezone-aware (UTC)
+
+        timestamp = int(dt.timestamp())
+
+        line = f"discord_id: {row['discord_id']}, join-date: <t:{timestamp}>, steamid64: {row['steamid']}, username: {username}"
         lines.append(line)
 
     result = "\n".join(lines)
