@@ -82,7 +82,7 @@ async def save_csv(steam_id: str, interaction: discord.Interaction, debug_mode: 
 async def award_role(interaction: discord.Interaction):
     role = interaction.guild.get_role(role_id)
     if interaction.guild.me.top_role <= interaction.user.top_role or interaction.user.resolved_permissions.administrator == True:
-        await interaction.channel.send("Cannot remove role from a user with higher permissions")
+        await interaction.channel.send("Cannot award role to a user with higher permissions")
         return
 
     if not interaction.guild.me.guild_permissions.manage_roles:
@@ -211,6 +211,33 @@ async def update(interaction: discord.Interaction):
     else:
         dataframe.to_csv(path_or_buf=CSV_FILE)
         await interaction.channel.send(f"{amount_of_users_dropped} dropped from affiliation role, savedata written!")
+
+@client.tree.command()
+@app_commands.default_permissions(administrator=True)
+async def list(interaction: discord.Interaction):
+    try:
+        if not os.path.isfile(path=CSV_FILE):
+            await interaction.response.send_message("No savedata saved!")
+            return
+    except pandas.errors.EmptyDataError:
+        interaction.response.send_message("EmptyDataError! Exiting list...")
+        return
+
+    df = pd.read_csv(CSV_FILE)
+
+    lines = []
+    for _, row in df.iterrows():
+        username = ""
+        user:discord.User = await client.fetch_user(int(row['discord_id']))
+        if user is not None:
+            username = user.display_name
+
+        line = f"discord_id: {row['discord_id']}, join-date: {row['verified_date']}, steamid64: {row['steamid']}, username: {username}\n"
+        lines.append(line)
+
+    result = "\n".join(lines)
+    print(result)
+    await interaction.response.send_message(result)
 
 
 client.run(token=token)
