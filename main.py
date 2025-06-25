@@ -112,7 +112,7 @@ async def request_user_stats(steam_id: str):
 
 async def award_role(interaction: discord.Interaction):
     role = interaction.guild.get_role(role_id)
-    if interaction.guild.me.top_role <= interaction.user.top_role or interaction.user.resolved_permissions.administrator == True:
+    if interaction.guild.me.top_role <= interaction.user.top_role:
         await interaction.channel.send("Cannot award role to a user with higher permissions")
         return
 
@@ -130,7 +130,12 @@ async def award_role(interaction: discord.Interaction):
 
 async def remove_role(user_id: int, interaction: discord.Interaction):
     user = await interaction.guild.fetch_member(user_id)
-    if interaction.guild.me.top_role <= interaction.user.top_role or interaction.user.resolved_permissions.administrator == True:
+    if user is None:
+        await interaction.channel.send("USER: Interaction remove_role error!")
+        return
+
+    print(user.resolved_permissions)
+    if interaction.guild.me.top_role <= user.top_role:
         await interaction.channel.send("Cannot remove role from a user with higher permissions")
         return
 
@@ -222,6 +227,7 @@ async def verify(interaction: discord.Interaction, steam_id_64: str, debug_mode:
 @client.tree.command()
 @app_commands.default_permissions(administrator=True)
 async def update(interaction: discord.Interaction):
+    print(interaction.guild.members)
     if not os.path.isfile(path=CSV_FILE):
         await interaction.response.send_message("No savedata saved!")
         return
@@ -236,10 +242,11 @@ async def update(interaction: discord.Interaction):
         # No longer affiliated
         if not user_check_response.json()["response"]:
             dc_id: int = int(row["discord_id"])
+            print(dc_id)
 
             # Remove from dataframe!
             dataframe.drop(index=index, inplace=True)
-            if await interaction.guild.fetch_member(dc_id) in interaction.guild.members:
+            if await interaction.guild.fetch_member(dc_id):
                 await remove_role(interaction=interaction, user_id=dc_id)
             amount_of_users_dropped += 1
 
