@@ -24,6 +24,10 @@ with open("config_secrets.json", mode="r") as file:
 
 MG_GUILD = discord.Object(id=int(my_guild))
 URL = "https://api.bandit.camp/affiliates/is-affiliate"
+GET_USER_STATS_URL = "https://api.bandit.camp/affiliates/user-stats"
+# ?steamid=76561198834014794&start=2024-10-01&end=2024-11-01
+
+
 CSV_FILE = "savedata.csv"
 
 
@@ -87,6 +91,23 @@ async def save_csv(steam_id: str, interaction: discord.Interaction, debug_mode: 
             await interaction.channel.send(f"Added SteamID64 {steam_id} to savedata.csv with verification date.")
     else:
         await interaction.channel.send(f"SteamID {steam_id} already in savedata.csv.")
+
+
+async def request_user_stats(steam_id: str):
+    now_datetime = datetime.datetime.now()
+    future_date = now_datetime + datetime.timedelta(days=30)
+
+    parameters: dict = {
+        "steamid": steam_id,
+        "start": now_datetime.strftime("%Y-%m-%d"),
+        "end": future_date.strftime("%Y-%m-%d")
+    }
+    # ?steamid=76561198834014794&start=2024-10-01&end=2024-11-01
+    headers = {
+        "Authorization": f"Bearer {bkey}"
+    }
+    response = requests.request(method="GET", url=GET_USER_STATS_URL, params=parameters, headers=headers, data={})
+    return response
 
 
 async def award_role(interaction: discord.Interaction):
@@ -168,7 +189,8 @@ async def verify(interaction: discord.Interaction, steam_id_64: str, debug_mode:
     if "steamcommunity.com" in steam_id_64:
         steam_id_64 = await filter_steam_uri(steam_id_64)
         if steam_id_64:
-            await interaction.response.send_message("This steamcommunity link is not valid. try to enter a steamid64 instead if the issue persists.")
+            await interaction.response.send_message(
+                "This steamcommunity link is not valid. try to enter a steamid64 instead if the issue persists.")
             return
 
     # Send the response
@@ -250,12 +272,8 @@ async def list(interaction: discord.Interaction):
             username = user.display_name
 
         date_str: str = row['verified_date']
-        dt = datetime.datetime.strptime(date_str, "%Y-%m-%d")
-        dt = dt.replace(tzinfo=datetime.timezone.utc)  # Make it timezone-aware (UTC)
 
-        timestamp = int(dt.timestamp())
-
-        line = f"discord_id: {row['discord_id']}, join-date: <t:{timestamp}>, steamid64: {row['steamid']}, username: {username}"
+        line = f"discord_id: {row['discord_id']}, join-date: {date_str}, steamid64: {row['steamid']}, username: {username}"
         lines.append(line)
 
     result = "\n".join(lines)
@@ -263,6 +281,67 @@ async def list(interaction: discord.Interaction):
     if result == "":
         result = "Empty."
     await interaction.response.send_message(result)
+
+
+@client.tree.command()
+@app_commands.default_permissions(administrator=True)
+async def usercheck(interaction: discord.Interaction, steamid64: str):
+    use_save_data = True
+    if not os.path.isfile(CSV_FILE):
+        await interaction.channel.send("No savefile found! not using save data!")
+        use_save_data = False
+
+    try:
+        df = pd.read_csv(CSV_FILE)
+    except pd.errors.EmptyDataError:
+        await interaction.channel.send("EmptyDataError, not using save data!")
+        use_save_data = False
+
+    int_steamid64 = 0
+    try:
+        int_steamid64 = int(steamid64)
+    except ValueError:
+        await interaction.response.send_message("Invalid SteamID64!")
+        return
+
+    response = await request_user_stats(steam_id=steamid64)
+    rp_json: dict = response.json()["response"]
+
+    affiliation_status = False
+    affiliation_start = ""
+    discord_id = "0"
+    if use_save_data:
+        df = pd.read_csv(CSV_FILE)
+        if int_steamid64 in df["steamid"].values:
+            affiliation_status = True
+            row = df[df["steamid"] == int_steamid64]
+            if not row.empty:
+                discord_id = str(row.iloc[0]["discord_id"])
+                affiliation_start = str(row.iloc[0]["verified_date"])
+
+    discord_user = None
+    if discord_id != "0":
+        discord_user: discord.User = await client.fetch_user(int(discord_id))
+    discorduser_display_name = ""
+    discorduser_user_name = ""
+    if not discord_user:
+        discorduser_display_name = "N/A"
+        discorduser_user_name = "N/A"
+    else:
+        discorduser_display_name = discord_user.display_name
+        discorduser_user_name = discord_user.name
+
+    response = f"""Success!
+Earnings: {str(rp_json["earnings"])}
+Deposited: {str(rp_json["deposited"])}
+Wagered: {str(rp_json["wagered"])}
+Affiliated: {str(affiliation_status)}
+Discord ID: {discord_id}
+Discord DisplayName: {discorduser_display_name}
+Discord Username: {discorduser_user_name}
+Affiliation Date: {affiliation_start}
+"""
+    await interaction.response.send_message(response)
 
 
 client.run(token=token)
