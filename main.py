@@ -98,6 +98,7 @@ async def filter_steam_uri(uri: str) -> str:
         return steamid64
     return "e2"
 
+
 async def request_user_stats(steam_id: str):
     now_datetime = datetime.datetime.now()
     future_date = now_datetime + datetime.timedelta(days=30)
@@ -202,6 +203,17 @@ async def verify(interaction: discord.Interaction, steam_id_64: str, debug_mode:
                 "This steamcommunity link is not valid. try to enter a steamid64 instead if the issue persists.")
             return
 
+    conn = sqlite3.connect(SQLITE_DB)
+    c = conn.cursor()
+
+    # If someone is already verified with your steam_id_64.
+    c.execute("SELECT EXISTS(SELECT 1 FROM affiliates WHERE steamid = ?)", (steam_id_64,))
+    exists = c.fetchone()[0]
+
+    if exists:
+        await interaction.response.send_message("ID already found in the database!")
+        return
+
     # Send the response
     response = await send_request(steam_id=steam_id_64)
 
@@ -295,7 +307,6 @@ async def usercheck(interaction: discord.Interaction, steamid64: str):
     row = c.fetchone()
     conn.close()
 
-
     response = await request_user_stats(steam_id=steamid64)
     rp_json: dict = response.json()["response"]
 
@@ -323,6 +334,36 @@ Discord Username: {discorduser_user_name}
 Affiliation Date: {affiliation_start}
 """
     await interaction.response.send_message(response_msg)
+
+
+@client.tree.command(name="unverify")
+@app_commands.default_permissions(administrator=True)
+async def unverify(interaction: discord.Interaction, user_id: str):
+    # Check if userid can become an int.
+    try:
+        int(user_id)
+    except ValueError:
+        await interaction.response.send_message("Invalid UserID")
+        return
+
+    dc_id = int(user_id)
+    conn = sqlite3.connect(SQLITE_DB)
+    c = conn.cursor()
+    c.execute("DELETE FROM affiliates WHERE discord_id = ?", (dc_id,))
+    rows_affected = c.rowcount
+    conn.commit()
+
+    if rows_affected == 0:
+        await interaction.response.send_message("Discord ID not found in database!")
+        return
+
+    if await interaction.guild.fetch_member(dc_id) is not None:
+        await remove_role(user_id=dc_id, interaction=interaction)
+        await interaction.response.send_message("User dropped from database and dropped from role!")
+    else:
+        await interaction.response.send_message("User dropped from database, user not found in server!")
+
+    return rows_affected
 
 
 client.run(token=token)
