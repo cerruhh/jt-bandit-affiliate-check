@@ -28,22 +28,8 @@ GET_USER_STATS_URL = "https://api.bandit.camp/affiliates/user-stats"
 # ?steamid=76561198834014794&start=2024-10-01&end=2024-11-01
 
 # Database
-SQLITE_DB = "savedata.db"
-TABLE_NAME = "affiliates"
-
-
-def init_db():
-    conn = sqlite3.connect(SQLITE_DB)
-    c = conn.cursor()
-    c.execute(f"""
-        CREATE TABLE IF NOT EXISTS {TABLE_NAME} (
-            steamid TEXT PRIMARY KEY,
-            verified_date TEXT,
-            discord_id TEXT
-        )
-    """)
-    conn.commit()
-    conn.close()
+SQLITE_DB: str = "savedata.db"
+TABLE_NAME: str = "affiliates"
 
 
 async def save_sqlite(steam_id: str, interaction: discord.Interaction, debug_mode: bool = False):
@@ -60,9 +46,6 @@ async def save_sqlite(steam_id: str, interaction: discord.Interaction, debug_mod
                 await interaction.channel.send(f"Added SteamID64 {steam_id} to database with verification date.")
         else:
             await interaction.channel.send(f"SteamID {steam_id} already in database.")
-
-
-init_db()
 
 
 class MyClient(discord.Client):
@@ -233,6 +216,9 @@ METHOD: GET
             await award_role(interaction=interaction)
 
 
+import asyncio
+import discord
+
 @client.tree.command()
 @app_commands.default_permissions(administrator=True)
 async def update(interaction: discord.Interaction):
@@ -240,22 +226,53 @@ async def update(interaction: discord.Interaction):
     amount_of_users_dropped = 0
     dropped_usernames = []
 
+    # Preload all members if possible (for small/medium servers)
+    try:
+        await interaction.guild.fetch_members(limit=None).flatten()
+    except Exception:
+        pass  # Ignore if not possible or too large
+
     async with aiosqlite.connect(SQLITE_DB) as db:
         async with db.execute(f"SELECT steamid, discord_id FROM {TABLE_NAME}") as cursor:
             rows = await cursor.fetchall()
 
-        for steamid, discord_id in rows:
+        semaphore = asyncio.BoundedSemaphore(2)  # Lowered concurrency to reduce rate limits
+
+        async def safe_fetch_member(guild, user_id):
+            member = guild.get_member(user_id)
+            if member is not None:
+                return member
+            async with semaphore:
+                for _ in range(3):  # Retry up to 3 times
+                    try:
+                        return await guild.fetch_member(user_id)
+                    except discord.HTTPException as e:
+                        if hasattr(e, "status") and e.status == 429:
+                            # Wait for the retry-after header if present, else 1 second
+                            retry_after = int(getattr(e.response, "headers", {}).get("Retry-After", 1))
+                            await asyncio.sleep(retry_after)
+                        else:
+                            break
+                    except (discord.NotFound, discord.Forbidden):
+                        break
+            return None
+
+        async def process_row(steamid, discord_id):
+            nonlocal amount_of_users_dropped
             user_check_response = await send_request(steam_id=steamid)
             if not user_check_response.json()["response"]:
                 await db.execute(f"DELETE FROM {TABLE_NAME} WHERE steamid = ?", (steamid,))
                 try:
-                    member = await interaction.guild.fetch_member(int(discord_id))
+                    member = await safe_fetch_member(interaction.guild, int(discord_id))
                     if member:
                         await remove_role(interaction=interaction, user_id=int(discord_id))
                         dropped_usernames.append(member.display_name)
                 except Exception:
                     pass
                 amount_of_users_dropped += 1
+
+        # Run all user checks concurrently, but limited by the semaphore
+        await asyncio.gather(*(process_row(steamid, discord_id) for steamid, discord_id in rows))
 
         await db.commit()
 
@@ -273,6 +290,7 @@ async def update(interaction: discord.Interaction):
         await interaction.followup.send(
             f"{usernames_str}{count_str} {verb} dropped from affiliation role."
         )
+
 
 
 @client.tree.command(name="list")
