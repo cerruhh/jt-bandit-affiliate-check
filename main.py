@@ -262,10 +262,10 @@ async def update(interaction: discord.Interaction):
     conn.commit()
     conn.close()
     if amount_of_users_dropped == 0:
-        await interaction.response.send_message(
+        await interaction.channel.send(
             f"{amount_of_users_dropped} dropped from affiliation role, database not written!")
     else:
-        await interaction.response.send_message(
+        await interaction.channel.send(
             f"{amount_of_users_dropped} dropped from affiliation role, database updated!")
 
 
@@ -280,6 +280,7 @@ async def list(interaction: discord.Interaction):
     if not rows:
         await interaction.response.send_message("No savedata saved!")
         return
+
     lines = []
     for steamid, verified_date, discord_id in rows:
         user: discord.User = await client.fetch_user(int(discord_id))
@@ -287,7 +288,7 @@ async def list(interaction: discord.Interaction):
         line = f"discord_id: {discord_id}, join-date: {verified_date}, steamid64: {steamid}, username: {username}"
         lines.append(line)
     result = "\n".join(lines) or "Empty."
-    await interaction.response.send_message(result)
+    await interaction.channel.send(result)
 
 
 @client.tree.command()
@@ -337,7 +338,6 @@ Affiliation Date: {affiliation_start}
 
 
 @client.tree.command(name="unverify")
-@app_commands.default_permissions(administrator=True)
 async def unverify(interaction: discord.Interaction, user_id: str):
     # Check if userid can become an int.
     try:
