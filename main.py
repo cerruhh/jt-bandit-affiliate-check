@@ -6,7 +6,12 @@ import requests
 import json
 import asyncio
 import datetime
+
 import sqlite3
+import aiosqlite
+
+import time
+import io
 
 # Init the token
 with open("config_secrets.json", mode="r") as file:
@@ -19,6 +24,7 @@ with open("config_secrets.json", mode="r") as file:
 MG_GUILD = discord.Object(id=int(my_guild))
 URL = "https://api.bandit.camp/affiliates/is-affiliate"
 GET_USER_STATS_URL = "https://api.bandit.camp/affiliates/user-stats"
+
 # ?steamid=76561198834014794&start=2024-10-01&end=2024-11-01
 
 # Database
@@ -41,19 +47,19 @@ def init_db():
 
 
 async def save_sqlite(steam_id: str, interaction: discord.Interaction, debug_mode: bool = False):
-    conn = sqlite3.connect(SQLITE_DB)
-    c = conn.cursor()
-    c.execute(f"SELECT 1 FROM {TABLE_NAME} WHERE steamid = ?", (steam_id,))
-    exists = c.fetchone()
-    if not exists:
-        c.execute(f"INSERT INTO {TABLE_NAME} (steamid, verified_date, discord_id) VALUES (?, ?, ?)",
-                  (steam_id, datetime.datetime.now().strftime("%Y-%m-%d"), str(interaction.user.id)))
-        conn.commit()
-        if debug_mode:
-            await interaction.channel.send(f"Added SteamID64 {steam_id} to database with verification date.")
-    else:
-        await interaction.channel.send(f"SteamID {steam_id} already in database.")
-    conn.close()
+    async with aiosqlite.connect(SQLITE_DB) as db:
+        async with db.execute(f"SELECT 1 FROM {TABLE_NAME} WHERE steamid = ?", (steam_id,)) as cursor:
+            exists = await cursor.fetchone()
+        if not exists:
+            await db.execute(
+                f"INSERT INTO {TABLE_NAME} (steamid, verified_date, discord_id) VALUES (?, ?, ?)",
+                (steam_id, datetime.datetime.now().strftime("%Y-%m-%d"), str(interaction.user.id))
+            )
+            await db.commit()
+            if debug_mode:
+                await interaction.channel.send(f"Added SteamID64 {steam_id} to database with verification date.")
+        else:
+            await interaction.channel.send(f"SteamID {steam_id} already in database.")
 
 
 init_db()
@@ -183,16 +189,6 @@ async def verify(interaction: discord.Interaction, steam_id_64: str, debug_mode:
         await interaction.response.send_message("User is already verified!")
         return
 
-    # if os.path.isfile(path=SQLITE_DB):
-    #     try:
-    #         dataframe = pd.read_csv("savedata.csv")
-    #         if interaction.user.id in dataframe["discord_id"].values:
-    #             await award_role(interaction=interaction)
-    #             await interaction.response.send_message("Adding missing role to your user...")
-    #             return
-    #     except pandas.errors.EmptyDataError:
-    #         print("Empty data warning!")
-
     if debug_mode:
         await interaction.channel.send(f"Got id: {steam_id_64}")
 
@@ -203,12 +199,10 @@ async def verify(interaction: discord.Interaction, steam_id_64: str, debug_mode:
                 "This steamcommunity link is not valid. try to enter a steamid64 instead if the issue persists.")
             return
 
-    conn = sqlite3.connect(SQLITE_DB)
-    c = conn.cursor()
-
-    # If someone is already verified with your steam_id_64.
-    c.execute("SELECT EXISTS(SELECT 1 FROM affiliates WHERE steamid = ?)", (steam_id_64,))
-    exists = c.fetchone()[0]
+    # Async DB check
+    async with aiosqlite.connect(SQLITE_DB) as db:
+        async with db.execute(f"SELECT EXISTS(SELECT 1 FROM {TABLE_NAME} WHERE steamid = ?)", (steam_id_64,)) as cursor:
+            exists = (await cursor.fetchone())[0]
 
     if exists:
         await interaction.response.send_message("ID already found in the database!")
@@ -217,15 +211,14 @@ async def verify(interaction: discord.Interaction, steam_id_64: str, debug_mode:
     # Send the response
     response = await send_request(steam_id=steam_id_64)
 
-    # Debug data
     if debug_mode:
         await interaction.channel.send(f"""SEND_URL: {URL}
-    METHOD: GET
-    """)
+METHOD: GET
+""")
         await interaction.channel.send(f"RESPONSE: {response.content}")
 
         if URL == "https://api.bandit.camp/affiliates/is-affiliate":
-            await interaction.channel.send(f"IS-AFFIL: {response.json()["response"]}")
+            await interaction.channel.send(f"IS-AFFIL: {response.json()['response']}")
 
     is_affiliate = response.json()["response"]
 
@@ -243,52 +236,85 @@ async def verify(interaction: discord.Interaction, steam_id_64: str, debug_mode:
 @client.tree.command()
 @app_commands.default_permissions(administrator=True)
 async def update(interaction: discord.Interaction):
-    conn = sqlite3.connect(SQLITE_DB)
-    c = conn.cursor()
-    c.execute(f"SELECT steamid, discord_id FROM {TABLE_NAME}")
-    rows = c.fetchall()
+    await interaction.response.defer()
     amount_of_users_dropped = 0
-    for steamid, discord_id in rows:
-        user_check_response = await send_request(steam_id=steamid)
-        if not user_check_response.json()["response"]:
-            # Remove from DB
-            c.execute(f"DELETE FROM {TABLE_NAME} WHERE steamid = ?", (steamid,))
-            try:
-                if await interaction.guild.fetch_member(int(discord_id)):
-                    await remove_role(interaction=interaction, user_id=int(discord_id))
-            except Exception:
-                pass
-            amount_of_users_dropped += 1
-    conn.commit()
-    conn.close()
-    if amount_of_users_dropped == 0:
-        await interaction.channel.send(
-            f"{amount_of_users_dropped} dropped from affiliation role, database not written!")
+    dropped_usernames = []
+
+    async with aiosqlite.connect(SQLITE_DB) as db:
+        async with db.execute(f"SELECT steamid, discord_id FROM {TABLE_NAME}") as cursor:
+            rows = await cursor.fetchall()
+
+        for steamid, discord_id in rows:
+            user_check_response = await send_request(steam_id=steamid)
+            if not user_check_response.json()["response"]:
+                await db.execute(f"DELETE FROM {TABLE_NAME} WHERE steamid = ?", (steamid,))
+                try:
+                    member = await interaction.guild.fetch_member(int(discord_id))
+                    if member:
+                        await remove_role(interaction=interaction, user_id=int(discord_id))
+                        dropped_usernames.append(member.display_name)
+                except Exception:
+                    pass
+                amount_of_users_dropped += 1
+
+        await db.commit()
+
+    if not dropped_usernames:
+        await interaction.followup.send(
+            f"{amount_of_users_dropped} users dropped from affiliation role, but no usernames could be found."
+        )
     else:
-        await interaction.channel.send(
-            f"{amount_of_users_dropped} dropped from affiliation role, database updated!")
+        display_usernames = dropped_usernames[:30]
+        if len(dropped_usernames) > 30:
+            display_usernames.append("etc...")
+        usernames_str = ", ".join(display_usernames)
+        verb = "was" if len(display_usernames) == 1 else "were"
+        count_str = f" ({len(dropped_usernames)} total)" if len(dropped_usernames) > 15 else ""
+        await interaction.followup.send(
+            f"{usernames_str}{count_str} {verb} dropped from affiliation role."
+        )
 
 
-@client.tree.command()
+@client.tree.command(name="list")
 @app_commands.default_permissions(administrator=True)
-async def list(interaction: discord.Interaction):
-    conn = sqlite3.connect(SQLITE_DB)
-    c = conn.cursor()
-    c.execute(f"SELECT steamid, verified_date, discord_id FROM {TABLE_NAME}")
-    rows = c.fetchall()
-    conn.close()
+async def list_c(interaction: discord.Interaction):
+    await interaction.response.defer()
+    start_time = time.perf_counter()
+
+    # Asynchronous database fetch
+    async with aiosqlite.connect(SQLITE_DB) as db:
+        async with db.execute(f"SELECT steamid, verified_date, discord_id FROM {TABLE_NAME}") as cursor:
+            rows = await cursor.fetchall()
+
     if not rows:
-        await interaction.response.send_message("No savedata saved!")
+        await interaction.followup.send("No savedata saved!")
         return
 
-    lines = []
-    for steamid, verified_date, discord_id in rows:
-        user: discord.User = await client.fetch_user(int(discord_id))
-        username = user.display_name if user else ""
-        line = f"discord_id: {discord_id}, join-date: {verified_date}, steamid64: {steamid}, username: {username}"
-        lines.append(line)
+    # Fetch users with cache check, then API if needed
+    async def fetch_user_safe(discord_id):
+        user = client.get_user(int(discord_id))
+        if user is not None:
+            return user
+        try:
+            return await client.fetch_user(int(discord_id))
+        except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+            return None
+
+    tasks = [fetch_user_safe(discord_id) for _, _, discord_id in rows]
+    users = await asyncio.gather(*tasks)
+
+    # Efficient string building
+    lines = (
+        f"discord_id: {discord_id}, join-date: {verified_date}, steamid64: {steamid}, username: {user.display_name if user else ''}"
+        for (steamid, verified_date, discord_id), user in zip(rows, users)
+    )
+
     result = "\n".join(lines) or "Empty."
-    await interaction.channel.send(result)
+    send_file = discord.File(io.StringIO(result), filename="list.txt")
+    end_time = time.perf_counter()
+
+    time_calculation = int((end_time - start_time) * 100) / 100
+    await interaction.followup.send(f"File created! time: {time_calculation} seconds!", file=send_file)
 
 
 @client.tree.command()
@@ -302,11 +328,10 @@ async def usercheck(interaction: discord.Interaction, steamid64: str):
             return
 
     use_save_data = True
-    conn = sqlite3.connect(SQLITE_DB)
-    c = conn.cursor()
-    c.execute(f"SELECT verified_date, discord_id FROM {TABLE_NAME} WHERE steamid = ?", (steamid64,))
-    row = c.fetchone()
-    conn.close()
+    async with aiosqlite.connect(SQLITE_DB) as db:
+        async with db.execute(f"SELECT verified_date, discord_id FROM {TABLE_NAME} WHERE steamid = ?",
+                              (steamid64,)) as cursor:
+            row = await cursor.fetchone()
 
     response = await request_user_stats(steam_id=steamid64)
     rp_json: dict = response.json()["response"]
@@ -320,7 +345,11 @@ async def usercheck(interaction: discord.Interaction, steamid64: str):
 
     discord_user = None
     if discord_id != "0":
-        discord_user: discord.User = await client.fetch_user(int(discord_id))
+        try:
+            discord_user: discord.User = await client.fetch_user(int(discord_id))
+        except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+            discord_user = None
+
     discorduser_display_name = discord_user.display_name if discord_user else "N/A"
     discorduser_user_name = discord_user.name if discord_user else "N/A"
 
@@ -334,30 +363,35 @@ Discord DisplayName: {discorduser_display_name}
 Discord Username: {discorduser_user_name}
 Affiliation Date: {affiliation_start}
 """
-    await interaction.response.send_message(response_msg)
+    await interaction.channel.send(response_msg)
 
 
 @client.tree.command(name="unverify")
 async def unverify(interaction: discord.Interaction, user_id: str):
-    # Check if userid can become an int.
+    # Check if user_id can become an int.
     try:
-        int(user_id)
+        dc_id = int(user_id)
     except ValueError:
         await interaction.response.send_message("Invalid UserID")
         return
 
-    dc_id = int(user_id)
-    conn = sqlite3.connect(SQLITE_DB)
-    c = conn.cursor()
-    c.execute("DELETE FROM affiliates WHERE discord_id = ?", (dc_id,))
-    rows_affected = c.rowcount
-    conn.commit()
+    # Async database delete
+    async with aiosqlite.connect(SQLITE_DB) as db:
+        async with db.execute("DELETE FROM affiliates WHERE discord_id = ?", (dc_id,)) as cursor:
+            rows_affected = cursor.rowcount
+        await db.commit()
 
     if rows_affected == 0:
         await interaction.response.send_message("Discord ID not found in database!")
         return
 
-    if await interaction.guild.fetch_member(dc_id) is not None:
+    # Try to fetch the member and remove role if found
+    try:
+        member = await interaction.guild.fetch_member(dc_id)
+    except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+        member = None
+
+    if member is not None:
         await remove_role(user_id=dc_id, interaction=interaction)
         await interaction.response.send_message("User dropped from database and dropped from role!")
     else:
