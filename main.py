@@ -9,6 +9,7 @@ import datetime
 
 import sqlite3
 import aiosqlite
+import threading
 
 import time
 import io
@@ -20,10 +21,12 @@ with open("config_secrets.json", mode="r") as file:
     my_guild = json_open["guild_id"]
     bkey = json_open["bkey"]
     role_id = json_open["role-id"]
+    update_channel_id = json_open["update-log-channel-id"]
+    update_log_interval = json_open["update-log-interval"]
 
 MG_GUILD = discord.Object(id=int(my_guild))
-URL = "https://api.bandit.camp/affiliates/is-affiliate"
-GET_USER_STATS_URL = "https://api.bandit.camp/affiliates/user-stats"
+URL:str = "https://api.bandit.camp/affiliates/is-affiliate"
+GET_USER_STATS_URL:str = "https://api.bandit.camp/affiliates/user-stats"
 
 # ?steamid=76561198834014794&start=2024-10-01&end=2024-11-01
 
@@ -78,6 +81,7 @@ client = MyClient(intents=intents)
 async def on_ready():
     print(f'Logged in as {client.user} (ID: {client.user.id})')
     print('------')
+    client.loop.create_task(run_every_hour())
 
 
 async def filter_steam_uri(uri: str) -> str:
@@ -85,6 +89,7 @@ async def filter_steam_uri(uri: str) -> str:
     if match:
         steamid64 = match.group(1)
         return steamid64
+    # Basically error code
     return "e2"
 
 
@@ -123,23 +128,33 @@ async def award_role(interaction: discord.Interaction):
     await interaction.channel.send("Verified!")
 
 
-async def remove_role(user_id: int, interaction: discord.Interaction):
-    user: discord.Member = await interaction.guild.fetch_member(user_id)
+async def remove_role(user_id: int, interaction: discord.Interaction = None, guild: discord.Guild = None):
+    if interaction is None:
+        if guild is None:
+            print("Remove role error!")
+            return
+        else:
+            channel = guild.get_channel(update_channel_id)
+    else:
+        guild = interaction.guild
+        channel = interaction.channel
+
+    user: discord.Member = await guild.fetch_member(user_id)
     if user is None:
-        await interaction.channel.send("USER: Interaction remove_role error!")
+        await channel.send("USER: Interaction remove_role error!")
         return
 
-    if interaction.guild.me.top_role <= user.top_role:
-        await interaction.channel.send("Cannot remove role from a user with higher permissions")
+    if guild.me.top_role <= user.top_role:
+        await channel.send("Cannot remove role from a user with higher permissions")
         return
 
-    if not interaction.guild.me.guild_permissions.manage_roles:
-        await interaction.channel.send("I do not have the manage roles permission, exiting command.")
+    if not guild.me.guild_permissions.manage_roles:
+        await channel.send("I do not have the manage roles permission, exiting command.")
         return
 
-    role = interaction.guild.get_role(role_id)
+    role = guild.get_role(role_id)
     if role is None:
-        await interaction.channel.send("Role not found!")
+        await channel.send("Role not found!")
         return
 
     await user.remove_roles(role)
@@ -219,6 +234,7 @@ METHOD: GET
 import asyncio
 import discord
 
+
 @client.tree.command()
 @app_commands.default_permissions(administrator=True)
 async def update(interaction: discord.Interaction):
@@ -291,6 +307,77 @@ async def update(interaction: discord.Interaction):
             f"{usernames_str}{count_str} {verb} dropped from affiliation role."
         )
 
+
+async def update_silent():
+    amount_of_users_dropped = 0
+    dropped_usernames = []
+    setup_guild = await client.fetch_guild(my_guild)
+    setup_channel = await setup_guild.fetch_channel(update_channel_id)
+
+    # Preload all members if possible (for small/medium servers)
+    try:
+        await setup_guild.fetch_members(limit=None).flatten()
+    except Exception:
+        pass  # Ignore if not possible or too large
+
+    async with aiosqlite.connect(SQLITE_DB) as db:
+        async with db.execute(f"SELECT steamid, discord_id FROM {TABLE_NAME}") as cursor:
+            rows = await cursor.fetchall()
+
+        semaphore = asyncio.BoundedSemaphore(2)  # Lowered concurrency to reduce rate limits
+
+        async def safe_fetch_member(guild, user_id):
+            member = guild.get_member(user_id)
+            if member is not None:
+                return member
+            async with semaphore:
+                for _ in range(3):  # Retry up to 3 times
+                    try:
+                        return await guild.fetch_member(user_id)
+                    except discord.HTTPException as e:
+                        if hasattr(e, "status") and e.status == 429:
+                            # Wait for the retry-after header if present, else 1 second
+                            retry_after = int(getattr(e.response, "headers", {}).get("Retry-After", 1))
+                            await asyncio.sleep(retry_after)
+                        else:
+                            break
+                    except (discord.NotFound, discord.Forbidden):
+                        break
+            return None
+
+        async def process_row(steamid, discord_id):
+            nonlocal amount_of_users_dropped
+            user_check_response = await send_request(steam_id=steamid)
+            if not user_check_response.json()["response"]:
+                await db.execute(f"DELETE FROM {TABLE_NAME} WHERE steamid = ?", (steamid,))
+                try:
+                    member = await safe_fetch_member(guild=setup_guild, user_id=int(discord_id))
+                    if member:
+                        await remove_role(user_id=int(discord_id), guild=setup_guild)
+                        dropped_usernames.append(member.display_name)
+                except Exception:
+                    pass
+                amount_of_users_dropped += 1
+
+        # Run all user checks concurrently, but limited by the semaphore
+        await asyncio.gather(*(process_row(steamid, discord_id) for steamid, discord_id in rows))
+
+        await db.commit()
+
+    if not dropped_usernames:
+        await setup_channel.send(
+            f"{amount_of_users_dropped} users dropped from affiliation role, but no usernames could be found."
+        )
+    else:
+        display_usernames = dropped_usernames[:30]
+        if len(dropped_usernames) > 30:
+            display_usernames.append("etc...")
+        usernames_str = ", ".join(display_usernames)
+        verb = "was" if len(display_usernames) == 1 else "were"
+        count_str = f" ({len(dropped_usernames)} total)" if len(dropped_usernames) > 15 else ""
+        await setup_channel.send(
+            f"{usernames_str}{count_str} {verb} dropped from affiliation role."
+        )
 
 
 @client.tree.command(name="list")
@@ -417,5 +504,10 @@ async def unverify(interaction: discord.Interaction, user_id: str):
 
     return rows_affected
 
+
+async def run_every_hour():
+    while True:
+        await asyncio.sleep(3600 * update_log_interval)
+        await update_silent()
 
 client.run(token=token)
